@@ -1,0 +1,158 @@
+@startuml component_diagram
+' UML-диаграмма компонентов: CBF-фильтр ограничения пиковой силы контакта для VLA-манипулятора
+' Рендер: plantuml -tsvg component_diagram.puml
+
+skinparam backgroundColor #FEFEFE
+skinparam defaultFontName "DejaVu Sans"
+skinparam defaultFontSize 12
+skinparam defaultFontColor #0f172a
+skinparam titleFontSize 15
+skinparam shadowing false
+skinparam componentStyle uml2
+skinparam linetype polyline
+skinparam nodesep 110
+skinparam ranksep 65
+skinparam ArrowColor #334155
+skinparam ArrowFontColor #1e293b
+skinparam InterfaceBorderColor #334155
+
+skinparam package {
+  BackgroundColor #FFFFFF
+  BorderColor #64748b
+  FontStyle bold
+}
+skinparam component {
+  BackgroundColor<<dev>> #dbeafe
+  BorderColor<<dev>> #1d4ed8
+  BackgroundColor<<sim>> #f1f5f9
+  BorderColor<<sim>> #64748b
+  BackgroundColor<<infra>> #fef3c7
+  BorderColor<<infra>> #b45309
+}
+skinparam interface {
+  BackgroundColor<<topic>> #a7f3d0
+  BackgroundColor<<service>> #f5d0fe
+  BackgroundColor<<action>> #fed7aa
+}
+skinparam note {
+  BackgroundColor #fffbea
+  BorderColor #a8a29e
+  FontSize 11
+}
+hide <<dev>> stereotype
+hide <<sim>> stereotype
+hide <<infra>> stereotype
+
+title Безопасное контактное взаимодействие манипулятора с человеком (CBF-фильтр + VLA) — компоненты ROS 2
+
+actor "Пользователь /\nexperiment_runner" as user
+
+' ───────── Внешний VLA-сервер (слева) ─────────
+component "<<external server>>\n**openpi_server (π0 VLA)**\nGPU · 20 Гц" as openpi <<infra>>
+interface "infer_action" as srv_vla <<service>>
+
+' ───────── Разрабатываемая система управления (центр) ─────────
+package "Система управления манипулятором (разрабатывается в курсе)" as CTRL {
+  interface "change_state" as srv_lifecycle <<service>>
+  interface "set_safety_mode" as srv_mode <<service>>
+
+  component "<<ROS 2 lifecycle node>>\n**/vla_task_coordinator**\nPython · 20 Гц" as coordinator <<dev>>
+
+  interface "desired_tcp_twist" as tp_twist <<topic>>
+  interface "safety_status" as tp_status <<topic>>
+
+  component "<<ROS 2 node>>\n**/cbf_safety_driver**\nC++ · 500 Гц\nTaskQP · CBFForce / CBFAvoid / SpeedLimit" as safety <<dev>>
+}
+
+' ───────── Имитация окружения и восприятия (справа) ─────────
+package "Имитация взаимодействия с человеком (вспомогательные узлы)" as SIM {
+  interface "start_intrusion" as srv_intr <<service>>
+  component "<<ROS 2 node>>\n**/human_zone_simulator**\nвторжение t_в, d + AdaptiveContact" as intrusion <<sim>>
+  interface "zone_command" as tp_zcmd <<topic>>
+
+  component "<<ROS 2 node>>\n**/zone_perception**\n500 Гц · задержка τ_p, окклюзия" as perception <<sim>>
+  interface "zone_estimate" as tp_zest <<topic>>
+}
+
+' ───────── Готовая инфраструктура (внизу) ─────────
+package "Симуляция и ros2_control (готовая инфраструктура)" as INFRA {
+  interface "commands" as tp_cmd <<topic>>
+  interface "joint_states" as tp_js <<topic>>
+  interface "zone_true_state" as tp_ztrue <<topic>>
+  interface "contact_forces" as tp_forces <<topic>>
+  interface "set_contact_params" as srv_cparams <<service>>
+
+  component "<<process>>\n**ros2_control_node**" as r2c <<infra>> {
+    component "<<controller>>\n**/arm_controller**\n//velocity / effort controller//\n7 суставов Panda" as arm_ctrl <<infra>>
+    component "<<controller>>\n**/joint_state_broadcaster**" as jsb <<infra>>
+    component "<<ROS 2 node>>\n**/mujoco_ros2_control_node**" as mjnode <<infra>> {
+      component "<<mujoco plugin>>\n**zone_state_publisher**\n1 кГц · прокси + зоны + силы" as zpub <<infra>>
+      component "<<mujoco plugin>>\n**adaptive_contact_plugin**\nK = c·k/μ_c (ISO/TS 15066)" as acp <<infra>>
+    }
+    component "<<ROS 2 node>>\n**/controller_manager**\n500 Гц: read → update → write" as cm <<infra>>
+  }
+}
+
+note bottom of safety
+  Фильтр работает на 500 Гц: считает зазоры до капсул-прокси звеньев,
+  приведённую массу μ и ограничивает скорость сближения v_max = F_max/√(μk);
+  при несовместности QP (slack > 0) переводит руку в безопасное торможение.
+end note
+
+' ───────── Предоставляемые интерфейсы (сплошная линия к кружку) ─────────
+srv_vla -- openpi
+srv_lifecycle -- coordinator
+coordinator -- tp_twist
+tp_status -- safety
+srv_mode -- safety
+srv_intr -- intrusion
+intrusion -- tp_zcmd
+tp_zest -- perception
+
+tp_cmd -- arm_ctrl
+tp_js -- jsb
+tp_ztrue -- zpub
+tp_forces -- zpub
+srv_cparams -- acp
+
+' ───────── Подсказки раскладки (чтобы не было пересечений) ─────────
+openpi -[hidden]right- coordinator
+coordinator -[hidden]right- intrusion
+tp_twist -[hidden]right- tp_status
+safety -[hidden]right- perception
+tp_cmd -[hidden]right- tp_js
+tp_js -[hidden]right- tp_ztrue
+tp_ztrue -[hidden]right- srv_cparams
+srv_cparams -[hidden]right- tp_forces
+
+' ───────── Используемые интерфейсы (пунктир к кружку) ─────────
+user ..> srv_lifecycle : configure / activate / deactivate
+user ..> srv_mode : выбор слоя:\nnone / speed250 / cbf_avoid / cbf_force
+user ..> srv_intr : запуск вторжения\n(зона, t_в, d)
+
+coordinator ..> srv_vla : запрос действия\n(кадры + задача)
+coordinator ..> tp_status : статус фильтрации\nи emergency_stop
+
+safety ..> tp_twist : желаемая скорость TCP
+safety ..> tp_zest : оценка положения\nи скорости зоны
+safety ..> tp_js : углы и скорости\nсуставов (q, q̇)
+safety ..> tp_cmd : команды суставов\n(500 Гц)
+
+perception ..> tp_ztrue : истинные координаты\nи скорость зоны
+intrusion ..> tp_ztrue : поза и скорость зоны
+intrusion ..> tp_js : конфигурация руки
+intrusion ..> srv_cparams : обновление K по μ_c
+acp ..> tp_zcmd : сила привода зоны
+
+legend bottom
+  |= Обозначение |= Смысл |
+  | Синий блок | разрабатываемый ROS 2-узел (Python / C++) |
+  | Серый блок | имитационный / вспомогательный узел |
+  | Жёлтый блок | готовая инфраструктура (MuJoCo, ros2_control, openpi) |
+  | Зелёный кружок <<topic>> | ROS 2 topic |
+  | Сиреневый кружок <<service>> | ROS 2 service |
+  | ——○ | узел предоставляет интерфейс |
+  | - - -> | узел использует интерфейс |
+endlegend
+
+@enduml
