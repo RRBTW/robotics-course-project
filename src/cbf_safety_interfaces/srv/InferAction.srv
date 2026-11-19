@@ -1,0 +1,5 @@
+string instruction
+geometry_msgs/Pose tcp_pose
+---
+bool ok
+geometry_msgs/Twist desired_twist
