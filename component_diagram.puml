@@ -10,7 +10,7 @@ skinparam titleFontSize 15
 skinparam shadowing false
 skinparam componentStyle uml2
 skinparam linetype polyline
-skinparam nodesep 110
+skinparam nodesep 105
 skinparam ranksep 65
 skinparam ArrowColor #334155
 skinparam ArrowFontColor #1e293b
@@ -61,40 +61,39 @@ package "Система управления манипулятором (раз�
   interface "desired_tcp_twist" as tp_twist <<topic>>
   interface "safety_status" as tp_status <<topic>>
 
-  component "<<ROS 2 node>>\n**/cbf_safety_driver**\nC++ · 500 Гц\nTaskQP · CBFForce / CBFAvoid / SpeedLimit" as safety <<dev>>
+  component "<<ROS 2 node>>\n**/cbf_safety_driver**\nC++ · 50 Гц\nTaskQP · CBFForce / CBFAvoid / SpeedLimit" as safety <<dev>>
 }
 
 ' ───────── Имитация окружения и восприятия (справа) ─────────
-package "Имитация взаимодействия с человеком (вспомогательные узлы)" as SIM {
+package "Имитация взаимодействия с человеком (реализуется в курсе)" as SIM {
   interface "start_intrusion" as srv_intr <<service>>
-  component "<<ROS 2 node>>\n**/human_zone_simulator**\nвторжение t_в, d + AdaptiveContact" as intrusion <<sim>>
-  interface "zone_command" as tp_zcmd <<topic>>
+  component "<<ROS 2 node>>\n**/human_zone_simulator**\nтраектория вторжения t_в, d" as intrusion <<sim>>
 
-  component "<<ROS 2 node>>\n**/zone_perception**\n500 Гц · задержка τ_p, окклюзия" as perception <<sim>>
+  component "<<ROS 2 node>>\n**/zone_perception**\n50 Гц · задержка τ_p, окклюзия" as perception <<sim>>
   interface "zone_estimate" as tp_zest <<topic>>
 }
 
-' ───────── Готовая инфраструктура (внизу) ─────────
-package "Симуляция и ros2_control (готовая инфраструктура)" as INFRA {
-  interface "commands" as tp_cmd <<topic>>
+' ───────── Готовая инфраструктура + имитационный плагин MuJoCo (внизу) ─────────
+package "Симуляция и ros2_control (готовая инфраструктура + плагин стенда)" as INFRA {
+  interface "arm_commands" as tp_cmd <<topic>>
   interface "joint_states" as tp_js <<topic>>
-  interface "zone_true_state" as tp_ztrue <<topic>>
+  interface "zone_commands" as tp_zcmd <<topic>>
   interface "contact_forces" as tp_forces <<topic>>
   interface "set_contact_params" as srv_cparams <<service>>
 
   component "<<process>>\n**ros2_control_node**" as r2c <<infra>> {
     component "<<controller>>\n**/arm_controller**\n//velocity / effort controller//\n7 суставов Panda" as arm_ctrl <<infra>>
-    component "<<controller>>\n**/joint_state_broadcaster**" as jsb <<infra>>
+    component "<<controller>>\n**/joint_state_broadcaster**\nрука + ползуны зоны" as jsb <<infra>>
+    component "<<controller>>\n**/zone_controller**\n//effort controller//\n3 ползуна манекена" as zone_ctrl <<infra>>
     component "<<ROS 2 node>>\n**/mujoco_ros2_control_node**" as mjnode <<infra>> {
-      component "<<mujoco plugin>>\n**zone_state_publisher**\n1 кГц · прокси + зоны + силы" as zpub <<infra>>
-      component "<<mujoco plugin>>\n**adaptive_contact_plugin**\nK = c·k/μ_c (ISO/TS 15066)" as acp <<infra>>
+      component "<<mujoco plugin (имитация в курсе)>>\n**contact_sim_plugin**\nпараметры solref (ISO/TS 15066) + силы" as cplugin <<sim>>
     }
-    component "<<ROS 2 node>>\n**/controller_manager**\n500 Гц: read → update → write" as cm <<infra>>
+    component "<<ROS 2 node>>\n**/controller_manager**\n50 Гц: read → update → write" as cm <<infra>>
   }
 }
 
 note bottom of safety
-  Фильтр работает на 500 Гц: считает зазоры до капсул-прокси звеньев,
+  Фильтр работает на 50 Гц: считает зазоры до капсул-прокси звеньев,
   приведённую массу μ и ограничивает скорость сближения v_max = F_max/√(μk);
   при несовместности QP (slack > 0) переводит руку в безопасное торможение.
 end note
@@ -106,23 +105,22 @@ coordinator -- tp_twist
 tp_status -- safety
 srv_mode -- safety
 srv_intr -- intrusion
-intrusion -- tp_zcmd
 tp_zest -- perception
 
 tp_cmd -- arm_ctrl
 tp_js -- jsb
-tp_ztrue -- zpub
-tp_forces -- zpub
-srv_cparams -- acp
+tp_zcmd -- zone_ctrl
+tp_forces -- cplugin
+srv_cparams -- cplugin
 
-' ───────── Подсказки раскладки (чтобы не было пересечений) ─────────
+' ───────── Подсказки раскладки ─────────
 openpi -[hidden]right- coordinator
 coordinator -[hidden]right- intrusion
 tp_twist -[hidden]right- tp_status
 safety -[hidden]right- perception
 tp_cmd -[hidden]right- tp_js
-tp_js -[hidden]right- tp_ztrue
-tp_ztrue -[hidden]right- srv_cparams
+tp_js -[hidden]right- tp_zcmd
+tp_zcmd -[hidden]right- srv_cparams
 srv_cparams -[hidden]right- tp_forces
 
 ' ───────── Используемые интерфейсы (пунктир к кружку) ─────────
@@ -135,19 +133,18 @@ coordinator ..> tp_status : статус фильтрации\nи emergency_stop
 
 safety ..> tp_twist : желаемая скорость TCP
 safety ..> tp_zest : оценка положения\nи скорости зоны
-safety ..> tp_js : углы и скорости\nсуставов (q, q̇)
-safety ..> tp_cmd : команды суставов\n(500 Гц)
+safety ..> tp_js : углы и скорости\nсуставов руки (q, q̇)
+safety ..> tp_cmd : скорости/моменты\nсуставов руки (50 Гц)
 
-perception ..> tp_ztrue : истинные координаты\nи скорость зоны
-intrusion ..> tp_ztrue : поза и скорость зоны
-intrusion ..> tp_js : конфигурация руки
-intrusion ..> srv_cparams : обновление K по μ_c
-acp ..> tp_zcmd : сила привода зоны
+perception ..> tp_js : координаты и скорости\nползунов зоны
+intrusion ..> tp_js : позы руки и зоны\n(для наведения и μ_c)
+intrusion ..> tp_zcmd : вектор усилий [Fx, Fy, Fz]\nна 3 ползуна манекена
+intrusion ..> srv_cparams : обновление жёсткости\nконтакта K = c·k/μ_c
 
 legend bottom
   |= Обозначение |= Смысл |
   | Синий блок | разрабатываемый ROS 2-узел (Python / C++) |
-  | Серый блок | имитационный / вспомогательный узел |
+  | Серый блок | имитационный узел или плагин, реализуемый в курсе |
   | Жёлтый блок | готовая инфраструктура (MuJoCo, ros2_control, openpi) |
   | Зелёный кружок <<topic>> | ROS 2 topic |
   | Сиреневый кружок <<service>> | ROS 2 service |
