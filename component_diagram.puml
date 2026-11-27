@@ -1,0 +1,139 @@
+@startuml component_diagram
+' UML-диаграмма компонентов: CBF-фильтр ограничения силы контакта манипулятора с человеком
+
+skinparam backgroundColor #FEFEFE
+skinparam defaultFontName "DejaVu Sans"
+skinparam defaultFontSize 12
+skinparam defaultFontColor #0f172a
+skinparam titleFontSize 15
+skinparam shadowing false
+skinparam componentStyle uml2
+skinparam linetype ortho
+skinparam nodesep 85
+skinparam ranksep 65
+skinparam ArrowColor #334155
+skinparam ArrowFontColor #1e293b
+skinparam InterfaceBorderColor #334155
+
+skinparam package {
+  BackgroundColor #FFFFFF
+  BorderColor #64748b
+  FontStyle bold
+}
+skinparam component {
+  BackgroundColor<<dev>> #dbeafe
+  BorderColor<<dev>> #1d4ed8
+  BackgroundColor<<infra>> #fef3c7
+  BorderColor<<infra>> #b45309
+}
+skinparam interface {
+  BackgroundColor<<topic>> #a7f3d0
+  BackgroundColor<<service>> #f5d0fe
+  BackgroundColor<<action>> #fed7aa
+}
+skinparam note {
+  BackgroundColor #fffbea
+  BorderColor #94a3b8
+  FontSize 11
+}
+hide <<dev>> stereotype
+hide <<infra>> stereotype
+
+title Система безопасного сближения манипулятора с человеком (CBF-фильтр) — компоненты ROS 2
+
+actor "Пользователь /\nсценарий (ros2 CLI)" as user
+
+' ───────── 2 разрабатываемых узла курса ─────────
+package "Разрабатываемые узлы ПО робота (2 модуля)" as DEV {
+  interface "change_state" as srv_lifecycle <<service>>
+  component "<<ROS 2 lifecycle node>>\n**/task_planner**\nPython · 20 Гц\nПланировщик целевой траектории TCP" as planner <<dev>>
+
+  interface "desired_tcp_twist" as tp_twist <<topic>>
+  interface "safety_status" as tp_status <<topic>>
+  interface "set_safety_mode" as srv_mode <<service>>
+
+  component "<<ROS 2 node>>\n**/cbf_safety_driver**\nC++ · 50 Гц\nCBF-QP фильтр по силе (ISO/TS 15066) + ИК" as driver <<dev>>
+}
+
+note left of DEV
+  **Как устроена система:**
+  Я пишу ровно 2 своих модуля, всё остальное — стандартные
+  пакеты ROS 2 и MuJoCo (никаких самописных плагинов).
+
+  1. **/task_planner** (Python, lifecycle) — ведущий логики.
+     Ведёт руку по точкам задачи (подлёт → перенос → опускание)
+     и останавливается, если фильтр включил аварийную остановку.
+  2. **/cbf_safety_driver** (C++, 50 Гц) — защитный фильтр и драйвер.
+     Смотрит в /joint_states, где сейчас рука и манекен человека,
+     при опасном сближении ограничивает скорость по ISO/TS 15066
+     и отдаёт безопасные команды на приводы руки.
+
+  **Какие данные ходят по связям:**
+  • change_state (ChangeState) — запуск/пауза планировщика
+  • desired_tcp_twist (TwistStamped) — желаемая скорость кисти
+  • safety_status (SafetyStatus) — статус фильтра и emergency_stop
+  • set_safety_mode (SetSafetyMode) — выбор режима защиты
+  • joint_states (JointState) — позы и скорости руки и манекена
+  • arm_commands (Float64MultiArray) — команды скоростей в руку
+  • human_trajectory (FollowJointTrajectory) — движение манекена
+end note
+
+' ───────── Стандартная инфраструктура ROS 2 и MuJoCo ─────────
+package "Стандартная инфраструктура ROS 2 + MuJoCo (пакеты ros-jazzy-*)" as STD {
+  interface "joint_states" as tp_js <<topic>>
+  interface "arm_commands" as tp_arm <<topic>>
+  interface "human_trajectory\n(вторжение манекена)" as act_human <<action>>
+
+  component "<<process (стандартный пакет)>>\n**ros2_control_node**" as r2c <<infra>> {
+    component "<<ROS 2 node (стандартный)>>\n**/controller_manager**\n50 Гц: read → update → write" as cm <<infra>>
+    component "<<ROS 2 node (стандартный)>>\n**/mujoco_ros2_control_node**\nфизика MuJoCo (сцена MJCF)" as mj <<infra>>
+    component "<<controller (стандартный)>>\n**/joint_state_broadcaster**\nсуставы руки + манекен" as jsb <<infra>>
+    component "<<controller (стандартный)>>\n**/arm_controller**\n//forward_command_controller//\n7 суставов манипулятора" as arm_ctrl <<infra>>
+    component "<<controller (стандартный)>>\n**/human_controller**\n//joint_trajectory_controller//\nподвижный манекен в сцене" as hum_ctrl <<infra>>
+  }
+}
+
+' ───────── Предоставляемые интерфейсы (——○) ─────────
+srv_lifecycle -- planner
+planner -- tp_twist
+tp_status -- driver
+srv_mode -- driver
+
+tp_js -- jsb
+tp_arm -- arm_ctrl
+act_human -- hum_ctrl
+
+' ───────── Подсказки раскладки ─────────
+tp_twist -[hidden]right- tp_status
+tp_status -[hidden]right- srv_mode
+tp_js -[hidden]right- tp_arm
+tp_arm -[hidden]right- act_human
+cm -[hidden]right- mj
+mj -[hidden]right- jsb
+jsb -[hidden]right- arm_ctrl
+arm_ctrl -[hidden]right- hum_ctrl
+
+' ───────── Используемые интерфейсы (- - ->) ─────────
+user ..> srv_lifecycle : configure / activate / deactivate
+user ..> srv_mode : режим: none / speed250 /\ncbf_avoid / cbf_force
+user ..> act_human
+
+planner ..> tp_js : положение руки
+planner ..> tp_status : emergency_stop
+
+driver ..> tp_twist : целевая скорость
+driver ..> tp_js : состояние руки\nи манекена
+driver ..> tp_arm : скорости суставов\n(50 Гц)
+
+legend bottom
+  |= Обозначение |= Смысл |
+  | Синий блок | разрабатываемый в курсе узел (Python / C++) |
+  | Жёлтый блок | стандартный пакет ROS 2 / ros2_control / MuJoCo |
+  | Зелёный кружок <<topic>> | ROS 2 topic |
+  | Сиреневый кружок <<service>> | ROS 2 service |
+  | Оранжевый кружок <<action>> | ROS 2 action |
+  | ——○ | узел предоставляет интерфейс |
+  | - - -> | узел использует интерфейс |
+endlegend
+
+@enduml
